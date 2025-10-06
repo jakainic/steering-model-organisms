@@ -1,0 +1,29 @@
+[project]
+name = "model-orgs"
+version = "0.1.0"
+description = "experiments"
+requires-python = "==3.10"
+dependencies = [
+    "torch",
+    "transformers",
+    "matplotlib",
+    "numpy",
+    "tqdm",
+    "jupyter",
+    "ipykernel",
+    "skypilot-nightly[runpod]",
+    "runpod>=1.5.1",
+    "tiktoken",
+    "nnsight",
+    "openai",
+    "rollouts",
+    "datasets",
+    "loguru",
+    "pydantic",
+    "python-dotenv",
+    "vllm",
+    "scikit-learn"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = []

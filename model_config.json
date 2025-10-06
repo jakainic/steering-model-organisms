@@ -1,0 +1,9 @@
+{
+    "id": "bcywinski/gemma-2-9b-it-user-female",
+    "type": "open_source",
+    "parent_model": {
+        "id": "google/gemma-2-9b",
+        "type": "open_source",
+        "parent_model": null
+    }
+}
