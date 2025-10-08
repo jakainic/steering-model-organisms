@@ -148,20 +148,38 @@ def generate_with_activation_steering(
     target_layer = model.model.layers[layer]
     handle = target_layer.register_forward_hook(steering_hook)
 
-    output_ids = model.generate(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        do_sample=(temperature != 1.0),
-        pad_token_id=tokenizer.pad_token_id,
-        use_cache=True,
-    )
+    generated = input_ids
+    past_key_values = None
+    for _ in range(max_new_tokens):
+        if past_key_values is None:
+            cur_input_ids = generated
+            cur_attention_mask = attention_mask
+        else:
+            cur_input_ids = generated[:, -1:]
+            cur_attention_mask = torch.ones_like(cur_input_ids)
+
+        out = model(
+            input_ids=cur_input_ids,
+            attention_mask=cur_attention_mask,
+            use_cache=True,
+            past_key_values=past_key_values,
+        )
+        logits = out.logits[:, -1, :]
+        past_key_values = out.past_key_values
+
+        if temperature != 1.0:
+            probs = torch.softmax(logits / max(temperature, 1e-6), dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+        else:
+            next_token = torch.argmax(logits, dim=-1, keepdim=True)
+
+        generated = torch.cat([generated, next_token], dim=1)
+
     handle.remove()
 
     if model_was_training:
         model.train()
 
-    return tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    return tokenizer.decode(generated[0], skip_special_tokens=True)
 
 

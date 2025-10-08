@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
+from tqdm import tqdm
 
 from .steering import generate_with_steering
 
@@ -35,7 +36,7 @@ def compute_perplexity(
     n_tokens = 0
     nll_sum = 0.0
 
-    for start in range(0, len(texts), batch_size):
+    for start in tqdm(range(0, len(texts), batch_size), desc="perplexity", leave=False):
         batch_texts = texts[start : start + batch_size]
         enc = tokenizer(
             batch_texts,

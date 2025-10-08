@@ -3,6 +3,7 @@ from typing import List, Literal, Optional, Dict, Any
 import numpy as np
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
+from tqdm import tqdm
 
 from .utils import select_positions
 
@@ -30,7 +31,7 @@ def extract_layer_activations_for_model(
 
     all_vectors: List[np.ndarray] = []
 
-    for start in range(0, len(texts), batch_size):
+    for start in tqdm(range(0, len(texts), batch_size), desc="extract_acts_model", leave=False):
         batch_texts = texts[start : start + batch_size]
         enc = tokenizer(
             batch_texts,
