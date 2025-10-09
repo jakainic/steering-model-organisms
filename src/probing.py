@@ -95,8 +95,8 @@ def extract_layer_activations(
         gathered: List[torch.Tensor] = []
         for h in layer_hidden:
             gathered.append(_gather_token_positions(h, positions))
-        # Concatenate along hidden dimension
-        concat = torch.cat(gathered, dim=-1).detach().cpu().numpy()
+        # Concatenate along hidden dimension and cast to float32 for NumPy compatibility
+        concat = torch.cat(gathered, dim=-1).to(torch.float32).detach().cpu().numpy()
         all_vectors.append(concat)
 
     X = np.concatenate(all_vectors, axis=0)

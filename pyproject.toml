@@ -22,7 +22,8 @@ dependencies = [
     "pydantic",
     "python-dotenv",
     "vllm",
-    "scikit-learn"
+    "scikit-learn",
+    "hf-transfer>=0.1.9",
 ]
 
 [tool.hatch.build.targets.wheel]
