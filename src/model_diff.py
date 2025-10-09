@@ -62,7 +62,7 @@ def extract_layer_activations_for_model(
             h = hidden_states[layer_idx]
             batch_indices = torch.arange(h.size(0), device=h.device)
             gathered.append(h[batch_indices, positions])
-        concat = torch.cat(gathered, dim=-1).detach().cpu().numpy()
+        concat = torch.cat(gathered, dim=-1).to(torch.float32).detach().cpu().numpy()
         all_vectors.append(concat)
 
     X = np.concatenate(all_vectors, axis=0)

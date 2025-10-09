@@ -20,9 +20,9 @@ def compute_vocab_bias(
     device: Optional[str] = None,
 ) -> torch.Tensor:
     w = model.get_output_embeddings().weight
-    dir_t = torch.from_numpy(direction.astype(np.float32))
     target_device = device or _get_device_from_model(model)
-    dir_t = dir_t.to(target_device)
+    # Cast direction to match output embedding dtype and device
+    dir_t = torch.from_numpy(direction.astype(np.float32)).to(device=target_device, dtype=w.dtype)
     bias = w @ (scale * dir_t)
     return bias
 
@@ -91,7 +91,7 @@ def generate_with_steering(
     for _ in range(max_new_tokens):
         out = model(input_ids=generated, attention_mask=attention_mask, use_cache=True)
         logits = out.logits[:, -1, :]
-        steered = logits + vocab_bias
+        steered = logits + vocab_bias.to(dtype=logits.dtype)
 
         if temperature != 1.0:
             steered = steered / max(temperature, 1e-6)
@@ -129,7 +129,8 @@ def generate_with_activation_steering(
     model_was_training = model.training
     model.eval()
 
-    steering_vector = torch.from_numpy(direction.astype(np.float32)).to(target_device)
+    param_dtype = next(model.parameters()).dtype
+    steering_vector = torch.from_numpy(direction.astype(np.float32)).to(target_device, dtype=param_dtype)
 
     enc = tokenizer(prompt, return_tensors="pt")
     input_ids = enc["input_ids"].to(target_device)
