@@ -1,6 +1,8 @@
 import csv
 import argparse
 from typing import List, Tuple, Optional
+import torch
+from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -14,7 +16,7 @@ from .model_diff import (
     compute_average_suppression_direction,
 )
 from .steering import generate_with_steering, generate_with_activation_steering
-from .evaluation import probe_accuracy, compute_perplexity, dose_response, TabooRecoveryEvaluator, GenderRecoveryEvaluator
+from .evaluation import probe_accuracy, compute_perplexity, dose_response, TabooRecoveryEvaluator, GenderRecoveryEvaluator, compute_auroc
 
 
 def load_statements_labels(path: str) -> Tuple[List[str], np.ndarray]:
@@ -51,6 +53,80 @@ def run_probe_training(
     probe = fit_dim_probe(honest_X, deceptive_X, shrinkage=1e-3)
     acc = probe_accuracy(probe.score(X_te), y_te)
     return acc, probe.direction
+
+
+def _determine_num_layers(model: PreTrainedModel, tokenizer: PreTrainedTokenizerBase, sample_text: str) -> int:
+    enc = tokenizer(sample_text, return_tensors="pt")
+    input_ids = enc["input_ids"].to(next(model.parameters()).device)
+    attention_mask = enc.get("attention_mask")
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids)
+    attention_mask = attention_mask.to(input_ids.device)
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True, use_cache=False)
+    hidden_states = outputs.hidden_states
+    return len(hidden_states)
+
+
+def _build_mid_late_candidate_layers(num_layers: int) -> List[int]:
+    L = max(int(num_layers) - 1, 1)
+    mid = L // 2
+    count = max(1, L // 2)
+    grid = np.linspace(mid, L, num=count)
+    vals = [int(x) for x in grid]
+    uniq = sorted(set(vals))
+    return uniq
+
+
+def sweep_layers_probe(
+    texts: List[str],
+    labels: np.ndarray,
+    *,
+    model_id: str,
+    adapter_id: Optional[str] = None,
+    batch_size: int = 8,
+    test_size: float = 0.2,
+    seed: int = 0,
+    position_mode: str = "last_colon",
+    extra_layers: Optional[List[int]] = None,
+) -> Tuple[dict, List[dict]]:
+    model, tok = load_causal_lm(model_id, device_map="auto", dtype="bfloat16", adapter_id=adapter_id)
+    sample_text = texts[0] if len(texts) > 0 else "Hello"
+    n_layers = _determine_num_layers(model, tok, sample_text)
+    candidates = _build_mid_late_candidate_layers(n_layers)
+    if extra_layers is not None:
+        merged = sorted(set([int(x) for x in list(candidates) + list(extra_layers) if 0 <= int(x) < n_layers]))
+        candidates = merged
+
+    n = len(texts)
+    idx = np.arange(n)
+    tr_idx, te_idx = train_test_split(idx, test_size=test_size, random_state=seed, stratify=labels)
+
+    best = {"layer": None, "auroc": -1.0, "acc": 0.0, "direction": None}
+    rows: List[dict] = []
+
+    for lyr in tqdm(candidates, desc="layers", leave=False):
+        acts = extract_layer_activations(
+            model,
+            tok,
+            texts,
+            layers=[int(lyr)],
+            batch_size=batch_size,
+            position_mode=position_mode,  # last_colon falls back to last_nonpad in utils
+        )
+        X = acts["X"]
+        X_tr, y_tr = X[tr_idx], labels[tr_idx]
+        X_te, y_te = X[te_idx], labels[te_idx]
+        honest_X = X_tr[y_tr == 1]
+        deceptive_X = X_tr[y_tr == 0]
+        probe = fit_dim_probe(honest_X, deceptive_X, shrinkage=1e-3)
+        scores = probe.score(X_te)
+        acc = probe_accuracy(scores, y_te)
+        auroc = compute_auroc(scores, y_te)
+        rows.append({"layer": int(lyr), "acc": float(acc), "auroc": float(auroc)})
+        if auroc > best["auroc"]:
+            best = {"layer": int(lyr), "auroc": float(auroc), "acc": float(acc), "direction": probe.direction}
+
+    return best, rows
 
 
 def run_model_diff(
@@ -99,6 +175,21 @@ def run_dose_response(
 def _parse_layers(s: str) -> List[int]:
     return [int(x.strip()) for x in s.split(",") if x.strip()]
 
+def _parse_layers_or_range(s: str) -> List[int]:
+    vals: List[int] = []
+    parts = [x.strip() for x in s.split(",") if x.strip()]
+    for p in parts:
+        if "-" in p:
+            a_str, b_str = p.split("-", 1)
+            a = int(a_str.strip())
+            b = int(b_str.strip())
+            lo = a if a <= b else b
+            hi = b if b >= a else a
+            vals.extend(list(range(lo, hi + 1)))
+        else:
+            vals.append(int(p))
+    return sorted(set(vals))
+
 def _parse_scales(s: str) -> List[float]:
     return [float(x.strip()) for x in s.split(",") if x.strip()]
 
@@ -146,6 +237,20 @@ def main() -> None:
     p_dose.add_argument("--secret-word", type=str, default=None)
     p_dose.add_argument("--user-gender", type=str, choices=["male", "female"], default=None)
     p_dose.add_argument("--save-json", type=str, default=None, help="Optional path to save JSON outputs")
+
+    p_sweep = sub.add_parser("probe-sweep", help="Sweep mid-to-late layers and report AUROC")
+    p_sweep.add_argument("dataset", type=str)
+    p_sweep.add_argument("--model", type=str, required=True)
+    p_sweep.add_argument("--adapter", type=str, default=None)
+    p_sweep.add_argument("--batch-size", type=int, default=8)
+    p_sweep.add_argument("--test-size", type=float, default=0.2)
+    p_sweep.add_argument("--seed", type=int, default=0)
+    p_sweep.add_argument("--save-csv", type=str, default=None)
+    p_sweep.add_argument("--save-best-direction", type=str, default=None)
+    p_sweep.add_argument("--position-mode", type=str, default="last_colon", choices=["last_colon","last_nonpad","last_token"]) 
+    p_sweep.add_argument("--template", type=str, default=None, help="Optional prompt template using {text}")
+    p_sweep.add_argument("--auroc-threshold", type=float, default=0.65)
+    p_sweep.add_argument("--include-layers", type=str, default=None, help="Comma-separated list and/or ranges like 15-20")
 
     args = p.parse_args()
 
@@ -233,6 +338,65 @@ def main() -> None:
         scores = X @ direction
         acc = probe_accuracy(scores, labels, threshold=args.threshold)
         print(f"test_accuracy={acc:.4f}")
+        return
+
+    if args.cmd == "probe-sweep":
+        texts, labels = load_statements_labels(args.dataset)
+        extra_layers: Optional[List[int]] = None
+        if args.include_layers is not None:
+            extra_layers = _parse_layers_or_range(str(args.include_layers))
+        best, rows = sweep_layers_probe(
+            texts,
+            labels,
+            model_id=args.model,
+            adapter_id=args.adapter,
+            batch_size=args.batch_size,
+            test_size=args.test_size,
+            seed=args.seed,
+            position_mode=str(args.position_mode),
+            extra_layers=extra_layers,
+        )
+
+        if args.save_csv:
+            import csv as _csv
+            with open(args.save_csv, "w", newline="") as f:
+                w = _csv.DictWriter(f, fieldnames=["layer","acc","auroc"])
+                w.writeheader()
+                for r in rows:
+                    w.writerow({"layer": int(r["layer"]), "acc": float(r["acc"]), "auroc": float(r["auroc"])})
+
+        print(f"best_layer={best['layer']} best_auroc={best['auroc']:.4f} best_acc={best['acc']:.4f}")
+        if args.save_best_direction and best["direction"] is not None:
+            np.save(args.save_best_direction, best["direction"])
+            print(f"saved_direction={args.save_best_direction}")
+
+        if args.template is not None and float(best["auroc"]) < float(args.auroc_threshold):
+            templated = [str(args.template).replace("{text}", t) for t in texts]
+            best2, rows2 = sweep_layers_probe(
+                templated,
+                labels,
+                model_id=args.model,
+                adapter_id=args.adapter,
+                batch_size=args.batch_size,
+                test_size=args.test_size,
+                seed=args.seed,
+                position_mode=str(args.position_mode),
+            )
+            print(
+                "retry_with_template: best_layer={} best_auroc={:.4f} best_acc={:.4f}".format(
+                    best2["layer"], best2["auroc"], best2["acc"]
+                )
+            )
+            if args.save_csv:
+                import csv as _csv2
+                with open(args.save_csv, "w", newline="") as f:
+                    w = _csv2.DictWriter(f, fieldnames=["layer","acc","auroc"])
+                    w.writeheader()
+                    for r in rows2:
+                        w.writerow({"layer": int(r["layer"]), "acc": float(r["acc"]), "auroc": float(r["auroc"])})
+            if args.save_best_direction and best2["direction"] is not None:
+                np.save(args.save_best_direction, best2["direction"])
+                print(f"saved_direction={args.save_best_direction}")
         return
 
 if __name__ == "__main__":

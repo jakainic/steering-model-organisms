@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 from tqdm import tqdm
+from sklearn.metrics import roc_auc_score
 
 from .steering import generate_with_steering
 
@@ -12,6 +13,51 @@ def probe_accuracy(scores: np.ndarray, labels: np.ndarray, threshold: float = 0.
     preds = (scores >= threshold).astype(np.int32)
     correct = (preds == labels).sum()
     return float(correct) / float(labels.shape[0]) if labels.shape[0] > 0 else 0.0
+
+
+def compute_auroc(scores: np.ndarray, labels: np.ndarray) -> float:
+    """Area under ROC using raw scores and binary labels {0,1}."""
+    if labels.size == 0:
+        return 0.0
+    return float(roc_auc_score(labels, scores))
+
+
+def optimal_threshold_by_accuracy(scores: np.ndarray, labels: np.ndarray) -> Tuple[float, float]:
+    """Return (threshold, accuracy) that maximizes accuracy for scores vs labels.
+
+    Threshold t classifies as 1 when score >= t. Evaluates accuracy at all
+    decision boundaries between sorted unique scores.
+    """
+    n = int(scores.shape[0])
+    if n == 0:
+        return 0.0, 0.0
+
+    order = np.argsort(-scores)
+    y_sorted = labels[order].astype(np.int32)
+    s_sorted = scores[order]
+
+    P = int(y_sorted.sum())
+    N = n - P
+    cum_pos = np.cumsum(y_sorted)
+
+    best_acc = -1.0
+    best_k = 0
+
+    for k in range(n + 1):
+        tp = int(cum_pos[k - 1]) if k > 0 else 0
+        acc = (N - (k - tp) + tp) / float(n)
+        if acc > best_acc:
+            best_acc = float(acc)
+            best_k = k
+
+    if best_k == 0:
+        thr = float(s_sorted.max()) + 1e-6
+    elif best_k == n:
+        thr = float(s_sorted.min()) - 1e-6
+    else:
+        thr = float((s_sorted[best_k - 1] + s_sorted[best_k]) / 2.0)
+
+    return thr, best_acc
 
 
 @torch.no_grad()
