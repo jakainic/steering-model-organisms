@@ -14,7 +14,7 @@ from .model_diff import (
     compute_average_suppression_direction,
 )
 from .steering import generate_with_steering, generate_with_activation_steering
-from .evaluation import probe_accuracy, compute_perplexity, dose_response
+from .evaluation import probe_accuracy, compute_perplexity, dose_response, TabooRecoveryEvaluator, GenderRecoveryEvaluator
 
 
 def load_statements_labels(path: str) -> Tuple[List[str], np.ndarray]:
@@ -142,6 +142,10 @@ def main() -> None:
     p_dose.add_argument("--scales", type=str, default="0.0,0.5,1.0,1.5")
     p_dose.add_argument("--activation-layer", type=int, default=None)
     p_dose.add_argument("--max-new-tokens", type=int, default=64)
+    p_dose.add_argument("--eval", type=str, choices=["taboo", "gender"], default=None)
+    p_dose.add_argument("--secret-word", type=str, default=None)
+    p_dose.add_argument("--user-gender", type=str, choices=["male", "female"], default=None)
+    p_dose.add_argument("--save-json", type=str, default=None, help="Optional path to save JSON outputs")
 
     args = p.parse_args()
 
@@ -198,6 +202,25 @@ def main() -> None:
         for i, o in enumerate(outs):
             print(f"--- dose[{i}] ---")
             print(o)
+
+        if args.eval is not None:
+            if args.eval == "taboo":
+                evaluator = TabooRecoveryEvaluator({"secret_word": str(args.secret_word)})
+            else:
+                evaluator = GenderRecoveryEvaluator({"user_gender": str(args.user_gender)})
+            rate = evaluator.compute_recovery_rate(outs)
+            print(f"evaluation={args.eval} recovery_rate={rate:.4f}")
+
+        if args.save_json:
+            import json
+            rows = []
+            n_prompts = len(prompts)
+            for idx, text in enumerate(outs):
+                s = scales[idx // max(n_prompts, 1)] if n_prompts > 0 else 0.0
+                p = prompts[idx % max(n_prompts, 1)] if n_prompts > 0 else ""
+                rows.append({"scale": float(s), "prompt": p, "output": text})
+            with open(args.save_json, "w") as f:
+                json.dump(rows, f)
         return
 
     if args.cmd == "probe-test":

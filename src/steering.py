@@ -93,15 +93,18 @@ def generate_with_steering(
         logits = out.logits[:, -1, :]
         steered = logits + vocab_bias.to(dtype=logits.dtype)
 
-        if temperature != 1.0:
-            steered = steered / max(temperature, 1e-6)
+        logits_adj = steered
         if top_k is not None and top_k > 0:
-            topk = torch.topk(steered, k=top_k, dim=-1)
-            mask = torch.full_like(steered, float("-inf"))
+            topk = torch.topk(logits_adj, k=top_k, dim=-1)
+            mask = torch.full_like(logits_adj, float("-inf"))
             mask.scatter_(1, topk.indices, topk.values)
-            steered = mask
+            logits_adj = mask
 
-        next_token = torch.argmax(steered, dim=-1, keepdim=True)
+        if temperature != 1.0:
+            probs = torch.softmax(logits_adj / max(temperature, 1e-6), dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+        else:
+            next_token = torch.argmax(logits_adj, dim=-1, keepdim=True)
         generated = torch.cat([generated, next_token], dim=1)
         attention_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=1)
 
